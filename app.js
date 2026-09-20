@@ -88,12 +88,15 @@ function askConfirm(text) {
 }
 function skeleton(n) { return '<div class="skeleton"></div>'.repeat(n); }
 
-function fatal(icon, title, text, retry) {
+// tech — мелкая строка снизу: что за клиент и версия. Нужна, когда приложение
+// не открылось и надо понять, на чём именно споткнулись.
+function fatal(icon, title, text, retry, tech) {
   $('#tabbar').hidden = true;
   screen().classList.add('no-tabs');
   screen().innerHTML = `<div class="empty" style="padding-top:18vh"><div class="big">${icon}</div>
     <h1>${esc(title)}</h1><p class="sub">${esc(text)}</p>
-    ${retry ? '<button class="btn" data-act="reload">Попробовать ещё раз</button>' : ''}</div>`;
+    ${retry ? '<button class="btn" data-act="reload">Попробовать ещё раз</button>' : ''}
+    ${tech ? `<p class="muted small" style="margin-top:18px">${esc(tech)}</p>` : ''}</div>`;
 }
 function showError(e, retry) {
   S.retry = retry;
@@ -127,7 +130,19 @@ async function start() {
     if (b.dataset.tab === 'add') openAdd(); else go(b.dataset.tab);
   }));
 
-  if (!tg) return fatal('📱', 'Откройте в Телеграме', 'Приложение работает внутри Телеграма: кнопка «Благо» в чате с ботом.');
+  // Две разные беды, которые раньше выглядели одинаково: страницу открыли вне
+  // Телеграма — или Телеграм её открыл, но не передал, кто это (initData пуста).
+  if (!WebApp) {
+    return fatal('🌐', 'Открыто не в Телеграме',
+      'Приложение работает только внутри Телеграма: кнопка «Благо» слева от поля ввода в чате с ботом. ' +
+      'Если вы открыли его именно оттуда — значит не загрузился telegram.org/js/telegram-web-app.js.', true);
+  }
+  if (!tg) {
+    return fatal('🔑', 'Телеграм не передал, кто вы',
+      'Так бывает, когда приложение открыли ссылкой, кнопкой снизу или старым клиентом. ' +
+      'Откройте его кнопкой «Благо» слева от поля ввода — или обновите Телеграм.', true,
+      'клиент: ' + (WebApp.platform || '?') + ' · версия мини-приложений: ' + (WebApp.version || '?'));
+  }
   if (!window.BLAGO_API && !window.BLAGO_TRANSPORT) return fatal('⚙️', 'Не указан адрес сервера', 'Впишите адрес веб-приложения Apps Script в config.js.');
 
   screen().innerHTML = skeleton(3);
