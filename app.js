@@ -3,7 +3,8 @@
 
 const WebApp = window.Telegram && window.Telegram.WebApp;
 const tg = WebApp && WebApp.initData ? WebApp : null;
-const S = { boot: null, me: null, week: null, weekOffset: 0, checks: null, tab: 'home', retry: null, circleMode: 'week', monthYm: null };
+const S = { boot: null, me: null, quest: null, meAt: 0, refreshing: false,
+            week: null, weekOffset: 0, checks: null, tab: 'home', retry: null, circleMode: 'week', monthYm: null };
 
 // ---------- сервер ----------
 
@@ -26,6 +27,40 @@ async function api(action, data) {
   }
   if (!res || !res.ok) throw new ApiError(res && res.error, (res && res.message) || 'Ошибка сервера.');
   return res;
+}
+
+// ---------- память телефона ----------
+
+// Один заход на сервер стоит около двух секунд, сколько бы он ни считал. Чтобы
+// приложение не открывалось в пустоту, последний ответ лежит на самом телефоне:
+// экран рисуется из него сразу, а свежие цифры подставляются, когда придут.
+// Кэш только свой (ключ с номером в Телеграме) и только на сегодня: вчерашние
+// цифры и вчерашняя дата в шапке — это враньё, лучше подождать.
+const HOME_CACHE = 'blago.home.v1.' + ((tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.id) || 'x');
+const FRESH_MS = 20000;
+
+function localYmd() {
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
+function saveHome() {
+  try {
+    localStorage.setItem(HOME_CACHE, JSON.stringify({ boot: S.boot, me: S.me, quest: S.quest }));
+  } catch (e) { /* приватный режим или нет места — не беда, просто без кэша */ }
+}
+
+function readHome() {
+  let c;
+  try { c = JSON.parse(localStorage.getItem(HOME_CACHE) || 'null'); } catch (e) { return null; }
+  if (!c || !c.boot || !c.me || !c.quest) return null;
+  // Кэш от прошлой версии приложения может не знать новых полей — такой не берём.
+  if (!c.boot.sport || !c.boot.library || !c.me.religion || !c.me.library) return null;
+  return c.boot.today === localYmd() ? c : null;
+}
+
+function forgetHome() {
+  try { localStorage.removeItem(HOME_CACHE); } catch (e) { /* нечего забывать */ }
 }
 
 // ---------- мелочи ----------
@@ -145,16 +180,33 @@ async function start() {
   }
   if (!window.BLAGO_API && !window.BLAGO_TRANSPORT) return fatal('⚙️', 'Не указан адрес сервера', 'Впишите адрес веб-приложения Apps Script в config.js.');
 
+  // Остался сегодняшний экран с прошлого раза — показываем его сразу, за
+  // свежим showHome сходит сам. Нет — ждём сервер и держим заглушку.
+  const cached = readHome();
+  if (cached) {
+    S.boot = cached.boot;
+    S.me = cached.me;
+    S.quest = cached.quest;
+    $('#tabbar').hidden = false;
+    return go('home');
+  }
+
   screen().innerHTML = skeleton(3);
   try {
-    S.boot = await api('boot');
+    await loadHome();
   } catch (e) {
-    if (e.code === 'not_member') return fatal('🤝', 'Вы ещё не в круге', e.message);
-    if (e.code === 'auth') return fatal('🔒', 'Не удалось войти', e.message);
-    return fatal('⚠️', 'Сервер не ответил', e.message, true);
+    return bootFailed(e);
   }
   $('#tabbar').hidden = false;
   go('home');
+}
+
+// Ошибки, после которых «Повторить» не поможет: показываем во весь экран и
+// забываем кэш, чтобы человек не смотрел на чужие или устаревшие цифры.
+function bootFailed(e) {
+  if (e.code === 'not_member') { forgetHome(); return fatal('🤝', 'Вы ещё не в круге', e.message); }
+  if (e.code === 'auth') { forgetHome(); return fatal('🔒', 'Не удалось войти', e.message); }
+  return fatal('⚠️', 'Сервер не ответил', e.message, true);
 }
 
 function go(tab) {
@@ -228,20 +280,39 @@ function daysRow(monday) {
 
 // ---------- главная ----------
 
+// Всё для главной приходит одним запросом: три отдельных стоили трёх заходов
+// на сервер по паре секунд каждый. Если данные только что получены (первый
+// запуск или возврат на вкладку сразу после загрузки), второй раз не ходим.
 async function showHome() {
+  if (S.me && Date.now() - S.meAt < FRESH_MS) { updateBadge(S.me.toCheck); return renderHome(); }
   if (S.me) renderHome(); else screen().innerHTML = homeHeader() + skeleton(2);
+  S.refreshing = !!S.me;
   try {
-    const both = await Promise.all([api('me'), api('quest')]);
-    S.me = both[0];
-    S.quest = both[1];
-  } catch (e) { if (S.tab === 'home') showError(e, showHome); return; }
+    await loadHome();
+  } catch (e) {
+    S.refreshing = false;
+    if (e.code === 'not_member' || e.code === 'auth') return bootFailed(e);
+    if (S.tab === 'home') showError(e, showHome);
+    return;
+  }
   updateBadge(S.me.toCheck);
   if (S.tab === 'home') renderHome();
 }
 
+async function loadHome() {
+  const r = await api('home');
+  S.boot = r.boot;
+  S.me = r.me;
+  S.quest = r.quest;
+  S.meAt = Date.now();
+  S.refreshing = false;
+  saveHome();
+}
+
 function homeHeader() {
   const p = ymdParts(S.boot.today);
-  return `<h1>Ас-саляму алейкум, ${esc(S.boot.me.name)}</h1><p class="sub">${WEEKDAYS[p.wd]}, ${p.d} ${MONTHS[p.m]}</p>`;
+  return `<h1>Ас-саляму алейкум, ${esc(S.boot.me.name)}</h1>
+    <p class="sub">${WEEKDAYS[p.wd]}, ${p.d} ${MONTHS[p.m]}${S.refreshing ? ' · обновляю…' : ''}</p>`;
 }
 
 function renderHome() {
@@ -491,9 +562,11 @@ async function verdict(id, decision, button) {
 
 // ---------- профиль ----------
 
+// Главная только что принесла те же данные — не ходить за ними второй раз.
 async function showMe() {
+  if (S.me && Date.now() - S.meAt < FRESH_MS) return renderMe();
   if (S.me) renderMe(); else screen().innerHTML = skeleton(3);
-  try { S.me = await api('me'); } catch (e) { if (S.tab === 'me') showError(e, showMe); return; }
+  try { S.me = await api('me'); S.meAt = Date.now(); } catch (e) { if (S.tab === 'me') showError(e, showMe); return; }
   updateBadge(S.me.toCheck);
   if (S.tab === 'me') renderMe();
 }
